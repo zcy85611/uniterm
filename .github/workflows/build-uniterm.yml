@@ -1,0 +1,151 @@
+name: Build uniTerm Windows x64 Portable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: https://github.com/ys-ll/uniterm.git
+  UPSTREAM_BRANCH: main
+
+jobs:
+  build:
+    name: Build Windows x64 Portable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Clone latest uniTerm source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:UPSTREAM_BRANCH $env:UPSTREAM_REPO uniterm
+
+          Set-Location uniterm
+
+          $commit = git rev-parse HEAD
+          $shortCommit = git rev-parse --short HEAD
+
+          "UNITERM_COMMIT=$commit" >> $env:GITHUB_ENV
+          "UNITERM_SHORT_COMMIT=$shortCommit" >> $env:GITHUB_ENV
+
+          Write-Host "uniTerm commit: $commit"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+          cache-dependency-path: uniterm/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: uniterm/frontend/package-lock.json
+
+      - name: Install Wails3
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.16
+
+          $goBin = go env GOPATH
+          "$goBin\bin" >> $env:GITHUB_PATH
+
+          wails3 version
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        working-directory: uniterm/frontend
+        run: |
+          npm ci
+
+      - name: Build uniTerm
+        shell: pwsh
+        working-directory: uniterm
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          wails3 build ARCH=amd64 VERSION=$env:UNITERM_SHORT_COMMIT
+
+      - name: Verify executable
+        shell: pwsh
+        working-directory: uniterm
+        run: |
+          if (-not (Test-Path "bin\uniTerm.exe")) {
+            Write-Error "uniTerm.exe was not generated"
+            exit 1
+          }
+
+          $file = Get-Item "bin\uniTerm.exe"
+
+          Write-Host "Executable:"
+          Write-Host $file.FullName
+          Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+
+      - name: Prepare portable package
+        shell: pwsh
+        run: |
+          $packageName = "uniTerm-windows-amd64-portable"
+
+          New-Item -ItemType Directory -Force -Path "dist\$packageName" | Out-Null
+
+          Copy-Item `
+            "uniterm\bin\uniTerm.exe" `
+            "dist\$packageName\uniTerm.exe"
+
+          @"
+          uniTerm Windows x64 Portable
+          
+          Upstream:
+          https://github.com/ys-ll/uniterm
+          
+          Commit:
+          $env:UNITERM_COMMIT
+          
+          Short commit:
+          $env:UNITERM_SHORT_COMMIT
+          
+          Build:
+          GitHub Actions
+          "@ | Set-Content "dist\$packageName\BUILD_INFO.txt"
+
+          Compress-Archive `
+            -Path "dist\$packageName\*" `
+            -DestinationPath "dist\$packageName.zip" `
+            -CompressionLevel Optimal
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uniTerm-windows-amd64-portable
+          path: dist/uniTerm-windows-amd64-portable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-${{ env.UNITERM_SHORT_COMMIT }}"
+          name: "uniTerm Windows Portable - ${{ env.UNITERM_SHORT_COMMIT }}"
+          prerelease: true
+          generate_release_notes: false
+          files: |
+            dist/uniTerm-windows-amd64-portable.zip
+          body: |
+            Automated Windows x64 portable build of uniTerm.
+
+            Upstream repository:
+            https://github.com/ys-ll/uniterm
+
+            Upstream commit:
+            ${{ env.UNITERM_COMMIT }}
+
+            This build is automatically compiled from the upstream main branch.
