@@ -3,6 +3,10 @@ name: Build uniTerm Windows x64 Portable
 on:
   workflow_dispatch:
 
+  schedule:
+    # 每天北京时间 03:00
+    - cron: "0 19 * * *"
+
 permissions:
   contents: write
 
@@ -22,7 +26,11 @@ jobs:
       - name: Clone latest uniTerm source
         shell: pwsh
         run: |
-          git clone --depth 1 --branch $env:UPSTREAM_BRANCH $env:UPSTREAM_REPO uniterm
+          git clone `
+            --depth 1 `
+            --branch $env:UPSTREAM_BRANCH `
+            $env:UPSTREAM_REPO `
+            uniterm
 
           Set-Location uniterm
 
@@ -33,6 +41,7 @@ jobs:
           "UNITERM_SHORT_COMMIT=$shortCommit" >> $env:GITHUB_ENV
 
           Write-Host "uniTerm commit: $commit"
+          Write-Host "uniTerm short commit: $shortCommit"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -56,11 +65,88 @@ jobs:
           $goBin = go env GOPATH
           "$goBin\bin" >> $env:GITHUB_PATH
 
+          Write-Host "Wails version:"
           wails3 version
+
+      - name: Check and fix Windows build files
+        shell: pwsh
+        working-directory: uniterm
+        run: |
+          Write-Host "Checking Windows build files..."
+
+          if (-not (Test-Path "build\windows\icon.ico")) {
+            Write-Error "Missing build/windows/icon.ico"
+            exit 1
+          }
+
+          if (-not (Test-Path "build\windows\info.json")) {
+            Write-Error "Missing build/windows/info.json"
+            exit 1
+          }
+
+          if (-not (Test-Path "build\windows\wails.exe.manifest")) {
+            Write-Host "wails.exe.manifest is missing."
+            Write-Host "Generating standard Windows manifest..."
+
+            @'
+          <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+
+          <assembly manifestVersion="1.0"
+            xmlns="urn:schemas-microsoft-com:asm.v1"
+            xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+
+            <assemblyIdentity
+              type="win32"
+              name="com.wails.uniTerm"
+              version="1.0.0.0"
+              processorArchitecture="*"/>
+
+            <dependency>
+              <dependentAssembly>
+                <assemblyIdentity
+                  type="win32"
+                  name="Microsoft.Windows.Common-Controls"
+                  version="6.0.0.0"
+                  processorArchitecture="*"
+                  publicKeyToken="6595b64144ccf1df"
+                  language="*"/>
+              </dependentAssembly>
+            </dependency>
+
+            <asmv3:application>
+              <asmv3:windowsSettings>
+
+                <dpiAware
+                  xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+                  true/pm
+                </dpiAware>
+
+                <dpiAwareness
+                  xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+                  permonitorv2,permonitor
+                </dpiAwareness>
+
+              </asmv3:windowsSettings>
+            </asmv3:application>
+
+          </assembly>
+          '@ | Set-Content `
+            -Path "build\windows\wails.exe.manifest" `
+            -Encoding UTF8
+
+            Write-Host "Manifest generated successfully."
+          }
+          else {
+            Write-Host "wails.exe.manifest already exists."
+          }
+
+          Write-Host ""
+          Write-Host "Windows build directory:"
+          Get-ChildItem "build\windows"
 
       - name: Install frontend dependencies
         shell: pwsh
-        working-directory: uniterm/frontend
+        working-directory: uniterm\frontend
         run: |
           npm ci
 
@@ -79,22 +165,30 @@ jobs:
         working-directory: uniterm
         run: |
           if (-not (Test-Path "bin\uniTerm.exe")) {
-            Write-Error "uniTerm.exe was not generated"
+            Write-Error "uniTerm.exe was not generated."
             exit 1
           }
 
           $file = Get-Item "bin\uniTerm.exe"
 
-          Write-Host "Executable:"
-          Write-Host $file.FullName
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "Build successful"
+          Write-Host "======================================"
+          Write-Host "File: $($file.FullName)"
           Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+          Write-Host "Commit: $env:UNITERM_COMMIT"
+          Write-Host "======================================"
 
       - name: Prepare portable package
         shell: pwsh
         run: |
           $packageName = "uniTerm-windows-amd64-portable"
 
-          New-Item -ItemType Directory -Force -Path "dist\$packageName" | Out-Null
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "dist\$packageName" | Out-Null
 
           Copy-Item `
             "uniterm\bin\uniTerm.exe" `
@@ -103,29 +197,51 @@ jobs:
           @"
           uniTerm Windows x64 Portable
           
-          Upstream:
+          Upstream repository:
           https://github.com/ys-ll/uniterm
           
-          Commit:
+          Upstream commit:
           $env:UNITERM_COMMIT
           
           Short commit:
           $env:UNITERM_SHORT_COMMIT
           
-          Build:
-          GitHub Actions
-          "@ | Set-Content "dist\$packageName\BUILD_INFO.txt"
+          Build date:
+          $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+          
+          Build environment:
+          GitHub Actions / Windows x64
+          "@ | Set-Content `
+            "dist\$packageName\BUILD_INFO.txt"
 
           Compress-Archive `
             -Path "dist\$packageName\*" `
             -DestinationPath "dist\$packageName.zip" `
             -CompressionLevel Optimal
 
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          $file = "dist\uniTerm-windows-amd64-portable.zip"
+
+          $hash = (Get-FileHash `
+            $file `
+            -Algorithm SHA256).Hash
+
+          "$hash  uniTerm-windows-amd64-portable.zip" |
+            Set-Content `
+            "dist\uniTerm-windows-amd64-portable.zip.sha256"
+
+          Write-Host "SHA256:"
+          Write-Host $hash
+
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: uniTerm-windows-amd64-portable
-          path: dist/uniTerm-windows-amd64-portable.zip
+          path: |
+            dist/uniTerm-windows-amd64-portable.zip
+            dist/uniTerm-windows-amd64-portable.zip.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -139,13 +255,14 @@ jobs:
           generate_release_notes: false
           files: |
             dist/uniTerm-windows-amd64-portable.zip
+            dist/uniTerm-windows-amd64-portable.zip.sha256
           body: |
             Automated Windows x64 portable build of uniTerm.
 
-            Upstream repository:
+            Upstream:
             https://github.com/ys-ll/uniterm
 
-            Upstream commit:
+            Commit:
             ${{ env.UNITERM_COMMIT }}
 
-            This build is automatically compiled from the upstream main branch.
+            This build was compiled directly from the upstream main branch.
