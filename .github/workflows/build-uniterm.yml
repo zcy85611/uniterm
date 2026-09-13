@@ -2,11 +2,7 @@ name: Build uniTerm Windows x64 Portable
 
 on:
   workflow_dispatch:
-
-  schedule:
-    # Every day at 19:00 UTC = 03:00 Beijing time
-    - cron: "0 19 * * *"
-
+  
 permissions:
   contents: write
 
